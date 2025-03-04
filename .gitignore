@@ -1,0 +1,26 @@
+# Ignore environment folder
+venv/
+pdf_chroma_db/
+attachments/
+document/
+
+# Ignore environment files
+.env
+credentials.json
+token.pickle
+processed_threads.json
+sop_topics.json
+
+# Ignore cache and backup files
+*.bak
+*.dat
+*.dir
+
+# Ignore Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore dependencies and attachments
+attachments/
+*.pdf
