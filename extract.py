@@ -6,9 +6,9 @@ import PyPDF2
 import docx
 import base64
 from PIL import Image
-import io
 import argparse
-import pytesseract
+# import pytesseract
+# import io
 
 load_dotenv()
 

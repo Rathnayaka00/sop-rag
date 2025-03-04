@@ -1,13 +1,13 @@
 import asyncio
 import json
 import websockets
-from datetime import datetime
-import threading
 from queue import Queue
-from concurrent.futures import ThreadPoolExecutor
-import time
 from fetch_gmail import get_gmail_service, check_new_emails
 from sop_analyzer import EmailConversationAnalyzer
+# from concurrent.futures import ThreadPoolExecutor
+# import time
+# from datetime import datetime
+# import threading
 
 attachment_status_queue = Queue()
 sop_analysis_queue = Queue()
@@ -87,9 +87,13 @@ class GmailWebSocketServer:
                         "message": analysis_result["message"]
                     })
                 else:
+                    if "analysis" in analysis_result and "used_rag" in analysis_result["analysis"]:
+                        rag_info = "RAG-enhanced" if analysis_result["analysis"]["used_rag"] else "Standard"
+                        print(f"Completed {rag_info} analysis for thread {thread_id}")
+                    
                     sop_analysis_queue.put({
                         "thread_id": thread_id,
-                        "analysis": analysis_result
+                        "analysis": analysis_result["analysis"] if "analysis" in analysis_result else analysis_result
                     })
                 
                 return analysis_result
@@ -107,12 +111,10 @@ class GmailWebSocketServer:
             
             return None
         finally:
-
             if thread_id in self.threads_in_process:
                 self.threads_in_process.remove(thread_id)
 
     async def process_thread_queue(self):
-        """Background task to process the thread queue"""
         while True:
             try:
                 if not thread_processing_queue.empty():

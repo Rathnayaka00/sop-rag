@@ -22,26 +22,23 @@ class EmailConversationAnalyzer:
     def __init__(self):
         self.client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.console = Console()
-        self.processed_threads = set()  
-        self.load_processed_threads() 
+        self.processed_threads = set()
+        self.load_processed_threads()
         
-        # Initialize embedding model and vector database
         self.embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         self.chroma_client = chromadb.PersistentClient(path="./pdf_chroma_db")
         self.collection = self.chroma_client.get_or_create_collection(name="pdf_embeddings")
         
-        # Load SOP topics
         self.sop_topics = self.load_sop_topics()
         
     def load_sop_topics(self) -> List[str]:
-        """Load the SOP topics from the JSON file."""
         try:
             if os.path.exists('sop_topics.json'):
                 with open('sop_topics.json', 'r') as f:
                     data = json.load(f)
-                    return data.get("sop_topics", [])
+                    return data.get('sop_topics', [])
             else:
-                console.print("[bold yellow]SOP topics file not found. Using empty list.[/bold yellow]")
+                console.print("[bold yellow]Warning: sop_topics.json not found. Using empty topics list.[/bold yellow]")
                 return []
         except Exception as e:
             console.print(f"[bold red]Error loading SOP topics: {e}[/bold red]")
@@ -112,71 +109,60 @@ class EmailConversationAnalyzer:
         ]
         
         return any(phrase in last_message for phrase in concluding_phrases)
+
+    def identify_conversation_topics(self, subject: str, conversation_text: str) -> List[str]:
+        prompt = f"""
+        Extract the 3-5 main topics or keywords from this email conversation:
         
-    def query_vector_db_for_context(self, query_text: str, num_results: int = 5) -> List[str]:
-        """Query the vector database to find relevant information for the conversation."""
-        try:
-            # Get vector embedding for the query
-            query_embedding = self.embedding_model.encode(query_text).tolist()
+        Subject: {subject}
+        
+        Conversation:
+        {conversation_text}
+        
+        Return ONLY a list of keywords or phrases that represent the main topics, one per line.
+        """
+        
+        response = self.client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=100
+        )
+        
+        topics = response.choices[0].message.content.strip().split("\n")
+        return [topic.strip("- ").lower() for topic in topics]
+    
+    def is_sop_relevant(self, conversation_topics: List[str]) -> bool:
+        if not self.sop_topics:
+            return False
             
-            # Search the collection
+        sop_topics_lower = [topic.lower() for topic in self.sop_topics]
+        
+        for topic in conversation_topics:
+            for sop_topic in sop_topics_lower:
+                if topic in sop_topic or sop_topic in topic:
+                    console.print(f"[bold green]Matched topic: {topic} with SOP topic: {sop_topic}[/bold green]")
+                    return True
+                    
+        return False
+        
+    def retrieve_relevant_sop_content(self, query: str, num_results: int = 5) -> str:
+        try:
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
             results = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=num_results
             )
             
-            # Return the document chunks
             if results and 'documents' in results and results['documents']:
-                return results['documents'][0]  # First list corresponds to first query
-            return []
+                documents = results['documents'][0]
+                return "\n".join(documents)
+            else:
+                return ""
         except Exception as e:
-            console.print(f"[bold red]Error querying vector database: {e}[/bold red]")
-            return []
-            
-    def check_sop_topic_relevance(self, conversation_text: str) -> Dict:
-        """Check if the conversation is relevant to any SOP topics."""
-        try:
-            if not self.sop_topics:
-                return {
-                    "is_relevant": False,
-                    "message": "No SOP topics available for checking relevance."
-                }
-                
-            prompt = f"""
-            Analyze the following email conversation to determine if it relates to any of these Standard Operating Procedure (SOP) topics:
-            
-            SOP Topics:
-            {", ".join(self.sop_topics)}
-            
-            Email conversation:
-            {conversation_text}
-            
-            Task:
-            1. Determine if this conversation relates to any of the SOP topics listed above
-            2. If relevant, identify which specific topics it relates to
-            3. Explain briefly why it's relevant to those topics
-            """
-            
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            analysis = response.choices[0].message.content
-            
-            # Check for relevance keywords in the response
-            relevant_indicators = ["relevant", "relates to", "connected to", "associated with"]
-            is_relevant = any(indicator in analysis.lower() for indicator in relevant_indicators)
-            
-            return {
-                "is_relevant": is_relevant,
-                "analysis": analysis,
-                "relevant_topics": [topic for topic in self.sop_topics if topic.lower() in analysis.lower()]
-            }
-            
-        except Exception as e:
-            console.print(f"[bold red]Error checking SOP topic relevance: {e}[/bold red]")
-            return {"is_relevant": False, "message": f"Error: {str(e)}"}
+            console.print(f"[bold red]Error retrieving SOP content: {e}[/bold red]")
+            return ""
 
     def generate_sop_pdf(self, analysis_result: Dict) -> str:
         filename = f"SOP_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
@@ -215,12 +201,6 @@ class EmailConversationAnalyzer:
             for attachment in analysis_result['analysis']['attachment_sources']:
                 content.append(Paragraph(f"• {attachment}", styles['Normal']))
             content.append(Spacer(1, 12))
-            
-        if 'relevant_topics' in analysis_result['analysis'] and analysis_result['analysis']['relevant_topics']:
-            content.append(Paragraph("Related SOP Topics:", styles['Heading2']))
-            for topic in analysis_result['analysis']['relevant_topics']:
-                content.append(Paragraph(f"• {topic}", styles['Normal']))
-            content.append(Spacer(1, 12))
         
         content.append(Paragraph("Description:", styles['Heading2']))
         content.append(Paragraph(analysis_result['analysis']['sop_description'], styles['Normal']))
@@ -257,12 +237,11 @@ class EmailConversationAnalyzer:
                 return {
                     "thread_id": thread_id,
                     "skipped": True,
-                    "message": "Analysis skipped: Last message is from Malinda Rathnayaka."
+                    "message": "Analysis skipped - last message from Malinda Rathnayaka."
                 }
         
             is_concluded = self.is_conversation_concluded(clean_conversation)
             
-            # Extract the full conversation text for analysis
             conversation_parts = []
             for msg in clean_conversation:
                 msg_text = f"{msg['sender']} ({msg['timestamp']}): {msg['message']}"
@@ -278,137 +257,187 @@ class EmailConversationAnalyzer:
             
             conversation_text = "\n\n".join(conversation_parts)
             
-            # Check if the conversation is relevant to SOP topics
-            topic_relevance = self.check_sop_topic_relevance(conversation_text)
+            conversation_topics = self.identify_conversation_topics(thread_data['subject'], conversation_text)
+            console.print(f"[bold blue]Identified conversation topics: {', '.join(conversation_topics)}[/bold blue]")
             
-            # Get relevant context from vector database if conversation is related to SOP topics
-            relevant_context = []
-            if topic_relevance.get("is_relevant", False):
-                # Use the subject and first message as the query
-                query_text = f"{thread_data['subject']} {clean_conversation[0]['message']}"
+            is_sop_relevant = self.is_sop_relevant(conversation_topics)
+            
+            if is_sop_relevant:
+                console.print("[bold green]Conversation is relevant to existing SOPs. Using RAG for enhanced analysis.[/bold green]")
                 
-                # Get relevant context from the PDF embeddings
-                relevant_context = self.query_vector_db_for_context(query_text)
-                console.print(f"[bold green]Found {len(relevant_context)} relevant context items from SOP database[/bold green]")
-            
-            functions = [{
-                "name": "analyze_conversation_needs",
-                "description": "Analyze if conversation needs SOP and generate appropriate response",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "needs_sop": {
-                            "type": "boolean",
-                            "description": "Whether the conversation requires an SOP"
-                        },
-                        "conversation_state": {
-                            "type": "string",
-                            "enum": ["ongoing", "concluded"],
-                            "description": "Current state of the conversation"
-                        },
-                        "has_sufficient_info": {
-                            "type": "boolean",
-                            "description": "Whether there's enough information to generate SOP"
-                        },
-                        "department": {
-                            "type": "string",
-                            "description": "Main department category (e.g., 'Human Resources (HR) & Administration', 'Finance & Accounting', 'IT & Security')"
-                        },
-                        "attachment_sources": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of attachment filenames that contributed to SOP creation"
-                        },
-                        "relevant_topics": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of SOP topics that are relevant to this conversation"
-                        },
-                        "suggested_questions": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Questions to gather more information if needed"
-                        },
-                        "sop_title": {
-                            "type": "string",
-                            "description": "Title for the SOP if needed"
-                        },
-                        "sop_description": {
-                            "type": "string",
-                            "description": "Brief description of the SOP purpose"
-                        },
-                        "sop_steps": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Detailed steps for the SOP"
-                        }
-                    },
-                    "required": ["needs_sop", "conversation_state", "department"]
-                }
-            }]
-
-            # Build the prompt with SOP topics and relevant context
-            prompt = f"""
-            Analyze this email conversation comprehensively, including any attachments:
-            
-            Subject: {thread_data['subject']}
-            
-            Conversation:
-            {conversation_text}
-            """
-            
-            # Add SOP topic relevance information if available
-            if topic_relevance.get("is_relevant", False):
-                prompt += f"""
+                query = f"Subject: {thread_data['subject']}\nTopics: {', '.join(conversation_topics)}"
+                relevant_sop_content = self.retrieve_relevant_sop_content(query)
                 
-                SOP Topic Analysis:
-                {topic_relevance.get("analysis", "")}
+                functions = [{
+                    "name": "analyze_conversation_needs",
+                    "description": "Analyze if conversation needs SOP and generate appropriate response",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "needs_sop": {
+                                "type": "boolean",
+                                "description": "Whether the conversation requires an SOP"
+                            },
+                            "conversation_state": {
+                                "type": "string",
+                                "enum": ["ongoing", "concluded"],
+                                "description": "Current state of the conversation"
+                            },
+                            "has_sufficient_info": {
+                                "type": "boolean",
+                                "description": "Whether there's enough information to generate SOP"
+                            },
+                            "department": {
+                                "type": "string",
+                                "description": "Main department category (e.g., 'Human Resources (HR) & Administration', 'Finance & Accounting', 'IT & Security')"
+                            },
+                            "attachment_sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of attachment filenames that contributed to SOP creation"
+                            },
+                            "suggested_questions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Questions to gather more information if needed"
+                            },
+                            "sop_title": {
+                                "type": "string",
+                                "description": "Title for the SOP if needed"
+                            },
+                            "sop_description": {
+                                "type": "string",
+                                "description": "Brief description of the SOP purpose"
+                            },
+                            "sop_steps": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Detailed steps for the SOP"
+                            }
+                        },
+                        "required": ["needs_sop", "conversation_state", "department"]
+                    }
+                }]
                 
-                Relevant SOP Topics:
-                {", ".join(topic_relevance.get("relevant_topics", []))}
+                prompt = f"""
+                Analyze this email conversation comprehensively, including any attachments:
+                
+                Subject: {thread_data['subject']}
+                
+                Conversation:
+                {conversation_text}
+                
+                RELEVANT SOP INFORMATION:
+                {relevant_sop_content}
+                
+                Tasks:
+                1. Determine if this conversation indicates a process that needs an SOP
+                2. Assess if the conversation is ongoing or concluded
+                3. Identify the main department category this conversation belongs to
+                4. If SOP is needed:
+                - Check if there's sufficient information to create the SOP
+                - If information is insufficient, suggest specific questions to gather more details
+                - If information is sufficient, create detailed SOP steps
+                - Incorporate relevant information from attachments (if any)
+                - List which attachments contributed to the SOP
+                - Incorporate the retrieved SOP information where relevant
                 """
-            
-            # Add relevant context from vector database if available
-            if relevant_context:
-                prompt += f"""
+
+                response = self.client.chat.completions.create(
+                    model="gpt-4-turbo-preview",
+                    messages=[{"role": "user", "content": prompt}],
+                    functions=functions,
+                    function_call={"name": "analyze_conversation_needs"}
+                )
+
+                analysis = json.loads(response.choices[0].message.function_call.arguments)
                 
-                Relevant Context from SOP Documents:
-                {"\n\n".join(relevant_context)}
+                analysis["used_rag"] = True
+                
+            else:
+                console.print("[bold yellow]Conversation not directly related to existing SOPs. Using standard analysis.[/bold yellow]")
+                
+                functions = [{
+                    "name": "analyze_conversation_needs",
+                    "description": "Analyze if conversation needs SOP and generate appropriate response",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "needs_sop": {
+                                "type": "boolean",
+                                "description": "Whether the conversation requires an SOP"
+                            },
+                            "conversation_state": {
+                                "type": "string",
+                                "enum": ["ongoing", "concluded"],
+                                "description": "Current state of the conversation"
+                            },
+                            "has_sufficient_info": {
+                                "type": "boolean",
+                                "description": "Whether there's enough information to generate SOP"
+                            },
+                            "department": {
+                                "type": "string",
+                                "description": "Main department category (e.g., 'Human Resources (HR) & Administration', 'Finance & Accounting', 'IT & Security')"
+                            },
+                            "attachment_sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of attachment filenames that contributed to SOP creation"
+                            },
+                            "suggested_questions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Questions to gather more information if needed"
+                            },
+                            "sop_title": {
+                                "type": "string",
+                                "description": "Title for the SOP if needed"
+                            },
+                            "sop_description": {
+                                "type": "string",
+                                "description": "Brief description of the SOP purpose"
+                            },
+                            "sop_steps": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Detailed steps for the SOP"
+                            }
+                        },
+                        "required": ["needs_sop", "conversation_state", "department"]
+                    }
+                }]
+                
+                prompt = f"""
+                Analyze this email conversation comprehensively, including any attachments:
+                
+                Subject: {thread_data['subject']}
+                
+                Conversation:
+                {conversation_text}
+                
+                Tasks:
+                1. Determine if this conversation indicates a process that needs an SOP
+                2. Assess if the conversation is ongoing or concluded
+                3. Identify the main department category this conversation belongs to
+                4. If SOP is needed:
+                - Check if there's sufficient information to create the SOP
+                - If information is insufficient, suggest specific questions to gather more details
+                - If information is sufficient, create detailed SOP steps
+                - Incorporate relevant information from attachments (if any)
+                - List which attachments contributed to the SOP
                 """
-            
-            prompt += """
-            
-            Tasks:
-            1. Determine if this conversation indicates a process that needs an SOP
-            2. Assess if the conversation is ongoing or concluded
-            3. Identify the main department category this conversation belongs to
-            4. If SOP is needed:
-               - Check if there's sufficient information to create the SOP
-               - If information is insufficient, suggest specific questions to gather more details
-               - If information is sufficient, create detailed SOP steps
-               - Incorporate relevant information from attachments (if any)
-               - List which attachments contributed to the SOP
-               - Consider the relevant SOP topics and context when creating the SOP
-            """
 
-            response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": prompt}],
-                functions=functions,
-                function_call={"name": "analyze_conversation_needs"}
-            )
+                response = self.client.chat.completions.create(
+                    model="gpt-4-turbo-preview",
+                    messages=[{"role": "user", "content": prompt}],
+                    functions=functions,
+                    function_call={"name": "analyze_conversation_needs"}
+                )
 
-            analysis = json.loads(response.choices[0].message.function_call.arguments)
-            
-            # Add relevant topics from our analysis if they're missing
-            if topic_relevance.get("is_relevant", False) and topic_relevance.get("relevant_topics"):
-                if "relevant_topics" not in analysis:
-                    analysis["relevant_topics"] = []
+                analysis = json.loads(response.choices[0].message.function_call.arguments)
                 
-                # Add any topics that weren't already included
-                for topic in topic_relevance.get("relevant_topics", []):
-                    if topic not in analysis["relevant_topics"]:
-                        analysis["relevant_topics"].append(topic)
+                analysis["used_rag"] = False
             
             result = {
                 "thread_id": thread_id,
@@ -445,22 +474,14 @@ class EmailConversationAnalyzer:
 
         if analysis_result['analysis']['needs_sop']:
             department = analysis_result['analysis']['department']
+            used_rag = analysis_result['analysis'].get('used_rag', False)
+            rag_status = "[RAG Enhanced]" if used_rag else "[Standard Analysis]"
+            
             console.print(Panel(
-                f"Department: {department}",
+                f"Department: {department} {rag_status}",
                 title="Department Classification",
                 style="bold blue"
             ))
-
-            # Show relevant SOP topics if available
-            if 'relevant_topics' in analysis_result['analysis'] and analysis_result['analysis']['relevant_topics']:
-                console.print(Panel(
-                    "\n".join([
-                        "Related to the following SOP topics:",
-                        *[f"- {topic}" for topic in analysis_result['analysis']['relevant_topics']]
-                    ]),
-                    title="Relevant SOP Topics",
-                    style="bold cyan"
-                ))
 
             if not analysis_result['analysis']['has_sufficient_info']:
                 console.print(Panel(
@@ -496,6 +517,6 @@ class EmailConversationAnalyzer:
                 
                 console.print(Panel(
                     "\n".join(output_lines),
-                    title="SOP Details",
+                    title=f"SOP Details {rag_status}",
                     style="bold blue"
                 ))

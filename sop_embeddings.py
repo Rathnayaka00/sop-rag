@@ -1,5 +1,4 @@
 import fitz 
-import os
 import chromadb
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv

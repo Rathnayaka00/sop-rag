@@ -2,13 +2,13 @@ import asyncio
 import websockets
 import json
 import signal
-import sys
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
-from rich.live import Live
 from datetime import datetime
+# import sys
+# from rich.live import Live
+# from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
@@ -75,73 +75,83 @@ class GmailWebSocketClient:
             ))
             return
         
-        analysis = analysis_data["analysis"]
-        if not analysis["analysis"]["needs_sop"]:
-            console.print(Panel(
-                f"Thread ID: {analysis['thread_id']}\nNo SOP needed for this conversation.",
-                title="SOP Analysis Result",
-                style="bold green"
-            ))
-            return
+        if "analysis" in analysis_data:
+            analysis = analysis_data["analysis"]
+            
+            if not analysis.get("needs_sop", False):
+                console.print(Panel(
+                    f"Thread ID: {thread_id}\nNo SOP needed for this conversation.",
+                    title="SOP Analysis Result",
+                    style="bold green"
+                ))
+                return
 
-        department = analysis["analysis"]["department"]
-        console.print(Panel(
-            f"Department: {department}",
-            title="Department Classification",
-            style="bold blue"
-        ))
-        
-        # Display relevant SOP topics if available
-        if "relevant_topics" in analysis["analysis"] and analysis["analysis"]["relevant_topics"]:
-            console.print(Panel(
-                "\n".join([
-                    "Related to the following SOP topics:",
-                    *[f"- {topic}" for topic in analysis["analysis"]["relevant_topics"]]
-                ]),
-                title="Relevant SOP Topics",
-                style="bold cyan"
-            ))
-
-        if not analysis["analysis"]["has_sufficient_info"]:
-            console.print(Panel(
-                "\n".join([
-                    "SOP is needed, but more information is required.",
-                    "\nSuggested questions to gather information:",
-                    *[f"- {q}" for q in analysis["analysis"]["suggested_questions"]]
-                ]),
-                title="Information Needed",
-                style="bold yellow"
-            ))
-        else:
-            output_lines = [
-                f"Title: {analysis['analysis']['sop_title']}",
-                f"\nDescription: {analysis['analysis']['sop_description']}",
-            ]
+            department = analysis.get("department", "Unknown Department")
             
-            if 'attachment_sources' in analysis['analysis'] and analysis['analysis']['attachment_sources']:
-                output_lines.append("\nAttachment Sources:")
-                for attachment in analysis['analysis']['attachment_sources']:
-                    output_lines.append(f"- {attachment}")
-            
-            cleaned_steps = [
-                step.lstrip('0123456789. ') 
-                for step in analysis['analysis']['sop_steps']
-            ]
-            
-            output_lines.extend([
-                "\nSteps:",
-                *[f"{i+1}. {step}" for i, step in enumerate(cleaned_steps)],
-                f"\nPDF Generated: {analysis.get('pdf_path', 'N/A')}"
-            ])
+            rag_status = ""
+            if "used_rag" in analysis:
+                rag_status = "[RAG Enhanced]" if analysis["used_rag"] else "[Standard Analysis]"
             
             console.print(Panel(
-                "\n".join(output_lines),
-                title="SOP Details",
+                f"Department: {department} {rag_status}",
+                title="Department Classification",
                 style="bold blue"
+            ))
+
+            if not analysis.get("has_sufficient_info", False):
+                suggested_questions = analysis.get("suggested_questions", [])
+                console.print(Panel(
+                    "\n".join([
+                        "SOP is needed, but more information is required.",
+                        "\nSuggested questions to gather information:",
+                        *[f"- {q}" for q in suggested_questions]
+                    ]),
+                    title="Information Needed",
+                    style="bold yellow"
+                ))
+            else:
+                if "sop_steps" in analysis:
+                    cleaned_steps = [
+                        step.lstrip('0123456789. ') 
+                        for step in analysis["sop_steps"]
+                    ]
+                    
+                    output_lines = [
+                        f"Title: {analysis.get('sop_title', 'Untitled SOP')}",
+                        f"\nDescription: {analysis.get('sop_description', 'No description available')}"
+                    ]
+                    
+                    
+                    if 'attachment_sources' in analysis and analysis['attachment_sources']:
+                        output_lines.append("\nAttachment Sources:")
+                        for attachment in analysis['attachment_sources']:
+                            output_lines.append(f"- {attachment}")
+                    
+                   
+                    output_lines.extend([
+                        "\nSteps:",
+                        *[f"{i+1}. {step}" for i, step in enumerate(cleaned_steps)]
+                    ])
+                    
+                    
+                    if 'pdf_path' in analysis_data:
+                        output_lines.append(f"\nPDF Generated: {analysis_data['pdf_path']}")
+                    
+                    console.print(Panel(
+                        "\n".join(output_lines),
+                        title=f"SOP Details {rag_status}",
+                        style="bold blue"
+                    ))
+        else:
+           
+            console.print(Panel(
+                f"Received analysis data with unexpected structure:\n{json.dumps(analysis_data, indent=2)}",
+                title="Unexpected Analysis Format",
+                style="bold red"
             ))
     
     def display_in_progress_threads(self):
-        """Display a table of all currently in-progress threads"""
+        
         if not self.in_progress_threads:
             return
             
@@ -225,7 +235,7 @@ class GmailWebSocketClient:
             self.websocket = None
     
     async def periodic_status_display(self):
-        """Periodically update the display of in-progress threads"""
+        
         while self.running:
             try:
                 if self.in_progress_threads:
